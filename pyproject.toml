@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pictures-org"
+version = "0.1.0"
+description = "Local photo and video inventory, exact duplicate reports, and recoverable cleanup"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+pictures-org = "pictures_org.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["pictures_org*"]
