@@ -1,7 +1,10 @@
 """Reviewable cleanup plans and a journaled, same-volume quarantine."""
 
 import os
+import hashlib
+import json
 import re
+import sqlite3
 import uuid
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
@@ -12,6 +15,36 @@ from .common import (SafetyError, beneath, check_content, fingerprint, plain_pat
 from .scan import MEDIA
 
 STATES = {"pending", "moving", "quarantined", "restoring", "restored", "purging", "purged"}
+
+
+def plan_digest(plan):
+    body = {**plan, "actions": [{k: v for k, v in a.items() if k != "status"}
+                                for a in plan["actions"]]}
+    return hashlib.sha256(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def open_journal(plan_path, plan):
+    path = plain_path(str(plan_path) + ".state.sqlite")
+    db = sqlite3.connect(path)
+    try:
+        db.execute("PRAGMA synchronous=FULL")
+        db.execute("CREATE TABLE IF NOT EXISTS meta(digest TEXT NOT NULL)")
+        db.execute("CREATE TABLE IF NOT EXISTS states(slot INTEGER PRIMARY KEY, status TEXT NOT NULL)")
+        row = db.execute("SELECT digest FROM meta").fetchone()
+        digest = plan_digest(plan)
+        if row is None:
+            db.execute("INSERT INTO meta VALUES(?)", (digest,))
+            db.commit()
+        elif row[0] != digest:
+            raise SafetyError("Plan was edited or does not match its state journal")
+        for slot, status in db.execute("SELECT slot,status FROM states"):
+            if not 0 <= slot < len(plan["actions"]) or status not in STATES:
+                raise SafetyError("Invalid cleanup journal entry")
+            plan["actions"][slot]["status"] = status
+        return db
+    except BaseException:
+        db.close()
+        raise
 
 
 def existing_parent(path):
@@ -150,12 +183,20 @@ def operate(plan_path, mode, confirm=None, progress=print):
             raise SafetyError("Permanent deletion requires --confirm with the exact plan ID")
         if mode == "apply" and root.stat().st_dev != existing_parent(quarantine).stat().st_dev:
             raise SafetyError("Quarantine must be on the same volume as the source")
+        journal = open_journal(plan_path, plan)
+        stack.callback(journal.close)
+        # SQLite commits every transition before/after a move. Keep the reviewable
+        # JSON as a snapshot on normal exit/error; after process death, the journal
+        # is replayed before any further file operation.
+        stack.callback(write_json, plan_path, plan)
+        slots = {id(action): index for index, action in enumerate(plan["actions"])}
         verified_keepers = {}
         completed = 0
 
         def save(action, state):
+            journal.execute("INSERT OR REPLACE INTO states VALUES(?,?)", (slots[id(action)], state))
+            journal.commit()
             action["status"] = state
-            write_json(plan_path, plan)
 
         def verified(action, path):
             return check_content(path, action["size_bytes"], action["sha256"])

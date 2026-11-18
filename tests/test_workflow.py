@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -37,6 +38,14 @@ class WorkflowTests(unittest.TestCase):
 
     def run_op(self, mode, **kwargs):
         return operate(self.plan_path, mode, progress=quiet, **kwargs)
+
+    def interrupted_state(self, slot, status):
+        db = sqlite3.connect(str(self.plan_path) + ".state.sqlite")
+        try:
+            db.execute("INSERT OR REPLACE INTO states VALUES(?,?)", (slot, status))
+            db.commit()
+        finally:
+            db.close()
 
     def test_inventory_and_exact_duplicate_accounting_leave_files_unchanged(self):
         (self.root / "different.jpg").write_bytes(b"x" * len(self.content))
@@ -198,6 +207,7 @@ class WorkflowTests(unittest.TestCase):
         self.run_op("apply")
         data = read_json(self.plan_path)
         data["actions"][0]["status"] = "purged"
+        self.interrupted_state(0, "purged")
         Path(data["actions"][0]["destination"]).unlink()
         write_json(self.plan_path, data)
         self.assertEqual(self.run_op("restore"), 1)
@@ -220,6 +230,7 @@ class WorkflowTests(unittest.TestCase):
         self.run_op("apply")
         data = read_json(self.plan_path)
         data["actions"][0]["status"] = "purging"
+        self.interrupted_state(0, "purging")
         Path(data["actions"][0]["destination"]).unlink()
         write_json(self.plan_path, data)
         self.assertEqual(self.run_op("purge", confirm=plan["id"]), 1)
@@ -230,6 +241,25 @@ class WorkflowTests(unittest.TestCase):
         write_json(self.plan_path, plan)
         with self.assertRaises(SafetyError):
             self.run_op("apply")
+
+    def test_journal_recovers_when_final_json_snapshot_was_not_written(self):
+        self.plan()
+        with patch("pictures_org.cleanup.write_json", side_effect=OSError("snapshot unavailable")):
+            with self.assertRaises(OSError):
+                self.run_op("apply")
+        self.assertTrue(all(a["status"] == "pending" for a in read_json(self.plan_path)["actions"]))
+        self.assertEqual(self.run_op("apply"), 0)
+        self.assertTrue(all(a["status"] == "quarantined" for a in read_json(self.plan_path)["actions"]))
+        self.assertEqual(self.run_op("restore"), 2)
+
+    def test_journal_refuses_changed_plan_after_apply(self):
+        self.plan()
+        self.run_op("apply")
+        data = read_json(self.plan_path)
+        data["actions"][0]["sha256"] = "f" * 64
+        write_json(self.plan_path, data)
+        with self.assertRaises(SafetyError):
+            self.run_op("restore")
 
     def test_keeper_cannot_also_be_a_removal_source(self):
         plan = self.plan()

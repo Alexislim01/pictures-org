@@ -79,9 +79,9 @@ The preferred folder must be within the collection. Do not hand-edit action path
 python -m pictures_org apply --plan ".pictures-org\cleanup-plan.json"
 ```
 
-Extra copies move into a unique, journaled quarantine folder **on the same drive**. The original keeper and each extra copy are content-verified before moving. Operations refuse links, invalid paths, occupied destinations, or changed files. The collection and plan are locked against concurrent cleanup runs.
+Extra copies move into a unique, journaled quarantine folder **on the same drive**. The original keeper and each extra copy are content-verified before moving. Operations refuse links, invalid paths, occupied destinations, or changed files. The collection and plan are locked against concurrent cleanup runs. A companion `cleanup-plan.json.state.sqlite` file durably records each state transition without rewriting the full plan for every file.
 
-**Quarantine does not free space on that drive.** It provides an undo period until you explicitly purge. The app has no scheduled or automatic deletion. Keep the JSON plan: it records original locations and is needed for restoration. The quarantine stores files under numbered slots, not their original names.
+**Quarantine does not free space on that drive.** It provides an undo period until you explicitly purge. The app has no scheduled or automatic deletion. Keep the JSON plan and its matching `.state.sqlite` journal together: they record original locations and current states for restoration. Use the current tool version for subsequent operations. The quarantine stores files under numbered slots, not their original names.
 
 ## 5. Restore if needed
 
@@ -105,7 +105,9 @@ This is deduplication within the local collection. It does not verify or clear t
 
 ## Interrupted operations
 
-Completed hashes and cleanup action states are saved incrementally. If interrupted between a file move and its journal update, rerun the same command: the tool checks both locations and reconciles the journal. Ambiguous states stop for inspection instead of guessing. An error can leave earlier actions completed; use the same plan to resume or restore.
+Completed hashes and cleanup action states are saved incrementally. Each cleanup transition is committed to SQLite before/after the move. The JSON snapshot is updated on normal exit or a handled error; after a killed process it can lag behind the journal. The next operation replays the matching journal first. Do not delete or replace it with an older copy. Changes to a plan's paths or content evidence are rejected once its journal exists.
+
+If interrupted between a file move and its journal update, rerun the same command: the tool checks both locations and reconciles the journal. Ambiguous states stop for inspection instead of guessing. An error can leave earlier actions completed; use the same plan to resume or restore.
 
 A normal error or Ctrl+C releases locks. If a process is killed or the computer crashes, a `.lock` file may remain. First verify that **no pictures-org cleanup process is still running**, then remove only the lock files named in the error (the plan's `.lock` and/or the collection's `.pictures-org-cleanup.lock`) and retry. Do not delete the plan or quarantine files. The journal handles process interruption; it is not a guarantee against hardware failure, power-loss corruption, concurrent external edits, or loss of the PC drive.
 
